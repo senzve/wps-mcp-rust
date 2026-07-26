@@ -3,7 +3,7 @@ use crate::docs::pathutil::{paths_equal, require_existing_file, resolve_output_p
 use quick_xml::events::{BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
-use std::io::{Cursor, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::Path;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -33,15 +33,40 @@ pub struct DocxWriteResult {
     pub output_path: String,
 }
 
+fn require_docx(path: impl AsRef<Path>) -> DocsResult<std::path::PathBuf> {
+    let path = require_existing_file(path)?;
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("docx"))
+        != Some(true)
+    {
+        return Err(DocsError::UnsupportedFormat("仅支持 .docx".into()));
+    }
+    Ok(path)
+}
+
 pub fn read_text(path: impl AsRef<Path>) -> DocsResult<DocxTextResult> {
-    let xml = read_document_xml(path)?;
-    let (text, _) = extract_text_and_tables(&xml)?;
+    let path = require_docx(path)?;
+    let file = std::fs::File::open(&path)?;
+    let mut zip = ZipArchive::new(file).map_err(|e| DocsError::ParseError(e.to_string()))?;
+    let doc = zip
+        .by_name("word/document.xml")
+        .map_err(|e| DocsError::ParseError(format!("缺少 word/document.xml: {e}")))?;
+    let reader = BufReader::new(doc);
+    let (text, _) = extract_text_and_tables_from_reader(reader)?;
     Ok(DocxTextResult { ok: true, text })
 }
 
 pub fn read_tables(path: impl AsRef<Path>) -> DocsResult<DocxTablesResult> {
-    let xml = read_document_xml(path)?;
-    let (_, tables) = extract_text_and_tables(&xml)?;
+    let path = require_docx(path)?;
+    let file = std::fs::File::open(&path)?;
+    let mut zip = ZipArchive::new(file).map_err(|e| DocsError::ParseError(e.to_string()))?;
+    let doc = zip
+        .by_name("word/document.xml")
+        .map_err(|e| DocsError::ParseError(format!("缺少 word/document.xml: {e}")))?;
+    let reader = BufReader::new(doc);
+    let (_, tables) = extract_text_and_tables_from_reader(reader)?;
     Ok(DocxTablesResult { ok: true, tables })
 }
 
@@ -49,8 +74,14 @@ pub fn to_markdown(
     path: impl AsRef<Path>,
     output_path: Option<&Path>,
 ) -> DocsResult<DocxMarkdownResult> {
-    let xml = read_document_xml(&path)?;
-    let (text, tables) = extract_text_and_tables(&xml)?;
+    let path_buf = require_docx(&path)?;
+    let file = std::fs::File::open(&path_buf)?;
+    let mut zip = ZipArchive::new(file).map_err(|e| DocsError::ParseError(e.to_string()))?;
+    let doc = zip
+        .by_name("word/document.xml")
+        .map_err(|e| DocsError::ParseError(format!("缺少 word/document.xml: {e}")))?;
+    let reader = BufReader::new(doc);
+    let (text, tables) = extract_text_and_tables_from_reader(reader)?;
     let mut md = text.trim().to_string();
     for table in tables {
         if table.is_empty() {
@@ -173,29 +204,11 @@ pub fn replace_text(
     })
 }
 
-fn read_document_xml(path: impl AsRef<Path>) -> DocsResult<String> {
-    let path = require_existing_file(path)?;
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("docx"))
-        != Some(true)
-    {
-        return Err(DocsError::UnsupportedFormat("仅支持 .docx".into()));
-    }
-    let file = std::fs::File::open(&path)?;
-    let mut zip = ZipArchive::new(file).map_err(|e| DocsError::ParseError(e.to_string()))?;
-    let mut doc = zip
-        .by_name("word/document.xml")
-        .map_err(|e| DocsError::ParseError(format!("缺少 word/document.xml: {e}")))?;
-    let mut xml = String::new();
-    doc.read_to_string(&mut xml)?;
-    Ok(xml)
-}
-
-fn extract_text_and_tables(xml: &str) -> DocsResult<(String, Vec<Vec<Vec<String>>>)> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(false);
+fn extract_text_and_tables_from_reader<R: BufRead>(
+    mut reader: R,
+) -> DocsResult<(String, Vec<Vec<Vec<String>>>)> {
+    let mut xml_reader = Reader::from_reader(&mut reader);
+    xml_reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut text = String::new();
     let mut tables = Vec::new();
@@ -206,7 +219,7 @@ fn extract_text_and_tables(xml: &str) -> DocsResult<(String, Vec<Vec<Vec<String>
     let mut in_t = false;
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        match xml_reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
                 match local.as_str() {

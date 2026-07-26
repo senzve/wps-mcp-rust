@@ -87,22 +87,25 @@ pub fn read_sheet(
         sheet_range
     };
 
-    let all_rows: Vec<Vec<Value>> = view
-        .rows()
-        .map(|row| row.iter().map(data_to_value).collect())
-        .collect();
-
-    let total_rows = all_rows.len();
+    let total_rows = view.height();
     let offset = opts.offset.unwrap_or(0);
     // limit=None 表示不截断（供 to_csv 等内部全量读取）；工具层会注入默认 limit
     let limit = opts.limit.unwrap_or(usize::MAX);
+
     if offset > total_rows {
         return Err(DocsError::InvalidArgument(format!(
             "offset {offset} 超出总行数 {total_rows}"
         )));
     }
+
+    let rows: Vec<Vec<Value>> = view
+        .rows()
+        .skip(offset)
+        .take(limit)
+        .map(|row| row.iter().map(data_to_value).collect())
+        .collect();
+
     let end = offset.saturating_add(limit).min(total_rows);
-    let rows = all_rows[offset..end].to_vec();
     let truncated = end < total_rows;
 
     Ok(ReadSheetResult {

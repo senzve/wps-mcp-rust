@@ -59,3 +59,16 @@ fn docx_create_refuses_overwrite_existing() {
     let err = create(&path, "second", "text").unwrap_err();
     assert!(err.to_string().contains("覆盖") || err.to_string().contains("已存在"));
 }
+
+#[test]
+fn test_read_docx_text_streaming() {
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("test.docx");
+    create(&docx_path, "Line 1\nLine 2", "text").unwrap();
+
+    let res = read_text(&docx_path).unwrap();
+    assert!(res.ok);
+    assert!(res.text.contains("Line 1"));
+    assert!(res.text.contains("Line 2"));
+}
+
