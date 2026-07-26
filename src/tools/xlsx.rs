@@ -17,7 +17,7 @@ pub struct XlsxReadParams {
     pub path: String,
     /// 工作表名称（与 xlsx_list_sheets 返回的名称一致）。必填。
     pub sheet: String,
-    /// 可选单元格区域（预留参数；当前实现读取整表后再分页）。
+    /// 可选 A1 风格单元格区域，如 `A1:C10` 或 `B2`；省略则读取整表后再按 limit/offset 分页。
     pub range: Option<String>,
     /// 最多返回的行数（分页）；省略则使用服务端默认上限。
     pub limit: Option<usize>,
@@ -73,12 +73,14 @@ pub fn xlsx_list_sheets(params: XlsxPathParams) -> CallToolResult {
 }
 
 pub fn xlsx_read(params: XlsxReadParams) -> CallToolResult {
+    // 工具层默认 limit=5000，防止大表 JSON 撑爆 stdio；docs 核心 limit=None 表示不截断
+    let limit = Some(params.limit.unwrap_or(xlsx::DEFAULT_ROW_LIMIT));
     match xlsx::read_sheet(
         &params.path,
         &params.sheet,
         ReadSheetOptions {
             range: params.range,
-            limit: params.limit,
+            limit,
             offset: params.offset,
         },
     ) {

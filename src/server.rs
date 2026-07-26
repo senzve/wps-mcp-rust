@@ -163,7 +163,7 @@ impl WpsMcpServer {
 
     #[tool(
         name = "xlsx_read",
-        description = "读取/通读/解析/分析 Excel 工作表(.xlsx)数据，支持 limit/offset 分页。适用于：提取表格、总结数据、整理功能矩阵/清单。path 与 sheet 必填（本地路径 + 工作表名）；可先 xlsx_list_sheets。"
+        description = "读取/通读/解析/分析 Excel 工作表(.xlsx)数据，支持 A1 区域（如 A1:C10）与 limit/offset 分页（默认 limit=5000）。适用于：提取表格、总结数据、整理功能矩阵/清单。path 与 sheet 必填（本地路径 + 工作表名）；可先 xlsx_list_sheets。"
     )]
     fn xlsx_read(
         &self,
@@ -296,5 +296,41 @@ mod description_tests {
         for kw in ["通读", "解析", "docx", "path", "优先"] {
             assert!(ins.contains(kw), "instructions missing: {kw}");
         }
+    }
+
+    #[test]
+    fn all_phase1_tools_are_registered() {
+        let server = WpsMcpServer::new();
+        let tools = server.tool_router.list_all();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        let expected = [
+            "ping",
+            "text_read",
+            "text_write",
+            "text_info",
+            "docx_read_text",
+            "docx_read_tables",
+            "docx_to_markdown",
+            "docx_create",
+            "docx_replace_text",
+            "xlsx_list_sheets",
+            "xlsx_read",
+            "xlsx_to_csv",
+            "xlsx_write",
+            "xlsx_update_cells",
+            "doc_list_embeddings",
+            "doc_extract_embedding",
+        ];
+        for name in expected {
+            assert!(
+                names.contains(&name),
+                "missing tool: {name}; have: {names:?}"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            expected.len(),
+            "unexpected extra tools: {names:?}"
+        );
     }
 }

@@ -1,7 +1,7 @@
 use crate::docs::error::{DocsError, DocsResult};
-use crate::docs::pathutil::{ensure_parent_dir, require_existing_file};
+use crate::docs::pathutil::{ensure_parent_dir, require_existing_file, resolve_output_path};
 use serde::Serialize;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
@@ -12,6 +12,8 @@ pub struct EmbeddingInfo {
     pub kind: String,
     pub extractable: bool,
     pub reason: Option<String>,
+    /// 包内路径，仅内部抽取使用，不对外暴露
+    #[serde(skip_serializing)]
     pub zip_path: String,
 }
 
@@ -148,10 +150,12 @@ fn resolve_extract_path(
     output_dir: Option<&Path>,
 ) -> DocsResult<PathBuf> {
     if let Some(p) = output_path {
-        return Ok(p.to_path_buf());
+        // 默认不覆盖已存在目标
+        return resolve_output_path(None, Some(p), false);
     }
     if let Some(dir) = output_dir {
-        return Ok(dir.join(&emb.name));
+        let candidate = dir.join(&emb.name);
+        return resolve_output_path(None, Some(&candidate), false);
     }
     Err(DocsError::InvalidArgument(
         "必须提供 output_path 或 output_dir".into(),
@@ -279,10 +283,4 @@ fn find_zip_payload(data: &[u8]) -> Option<Vec<u8>> {
     data.windows(4)
         .position(|w| w == [0x50, 0x4B, 0x03, 0x04])
         .map(|idx| data[idx..].to_vec())
-}
-
-// keep Write in scope for potential future streaming
-#[allow(dead_code)]
-fn _w(w: &mut dyn Write) {
-    let _ = w;
 }

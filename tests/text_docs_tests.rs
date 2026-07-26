@@ -41,3 +41,22 @@ fn write_and_read_roundtrip() {
     let info = text_info(&path).unwrap();
     assert!(info.line_count >= 1);
 }
+
+#[test]
+fn missing_path_returns_not_found() {
+    let err = read_text(
+        "tests/fixtures/definitely-missing-xyz.txt",
+        ReadTextOptions::default(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("不存在"));
+}
+
+#[test]
+fn write_refuses_overwrite_without_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("exists.txt");
+    write_text(&path, "one", None, true).unwrap();
+    let err = write_text(&path, "two", None, false).unwrap_err();
+    assert!(err.to_string().contains("覆盖") || err.to_string().contains("已存在"));
+}

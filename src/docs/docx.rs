@@ -1,5 +1,5 @@
 use crate::docs::error::{DocsError, DocsResult};
-use crate::docs::pathutil::{require_existing_file, resolve_output_path};
+use crate::docs::pathutil::{paths_equal, require_existing_file, resolve_output_path};
 use quick_xml::events::{BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
@@ -77,8 +77,9 @@ pub fn to_markdown(
     }
     let mut out_path = None;
     if let Some(p) = output_path {
-        std::fs::write(p, &md)?;
-        out_path = Some(p.display().to_string());
+        let out = resolve_output_path(None, Some(p), false)?;
+        std::fs::write(&out, &md)?;
+        out_path = Some(out.display().to_string());
     }
     Ok(DocxMarkdownResult {
         ok: true,
@@ -88,7 +89,8 @@ pub fn to_markdown(
 }
 
 pub fn create(path: impl AsRef<Path>, content: &str, format: &str) -> DocsResult<DocxWriteResult> {
-    let out = resolve_output_path(None, Some(path.as_ref()), true)?;
+    // 新建文件：目标已存在时拒绝覆盖（符合写操作默认不覆盖约定）
+    let out = resolve_output_path(None, Some(path.as_ref()), false)?;
     let paragraphs: Vec<String> = match format {
         "text" | "markdown" => content
             .lines()
@@ -120,7 +122,9 @@ pub fn replace_text(
     output_path: Option<&Path>,
 ) -> DocsResult<DocxWriteResult> {
     let src = require_existing_file(path)?;
-    let out = resolve_output_path(Some(&src), output_path, output_path.is_none())?;
+    // 省略 output_path 时写回源文件；指定新路径时默认不覆盖已存在目标
+    let overwrite = output_path.map(|p| paths_equal(&src, p)).unwrap_or(true);
+    let out = resolve_output_path(Some(&src), output_path, overwrite)?;
 
     let file = std::fs::File::open(&src)?;
     let mut archive = ZipArchive::new(file).map_err(|e| DocsError::ParseError(e.to_string()))?;
@@ -386,5 +390,3 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-
-// silence unused imports if any

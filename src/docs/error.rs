@@ -25,6 +25,14 @@ pub enum DocsError {
 
 impl DocsError {
     pub fn to_public_message(&self) -> String {
-        self.to_string()
+        match self {
+            DocsError::IoError(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                format!("权限不足: {e}")
+            }
+            DocsError::IoError(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                format!("路径不存在: {e}")
+            }
+            other => other.to_string(),
+        }
     }
 }

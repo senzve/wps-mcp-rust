@@ -1,5 +1,5 @@
 use crate::docs::error::{DocsError, DocsResult};
-use crate::docs::pathutil::{require_existing_file, resolve_output_path};
+use crate::docs::pathutil::{paths_equal, require_existing_file, resolve_output_path};
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use serde::Serialize;
 use serde_json::Value;
@@ -67,31 +67,41 @@ pub fn read_sheet(
     let mut workbook: Xlsx<_> =
         open_workbook(&path).map_err(|e| DocsError::ParseError(format!("{e}")))?;
 
-    if let Some(r) = &opts.range {
-        // v1: range 参数预留，当前读取整表后由调用方自行切片；非法标记仍校验非空
-        if r.trim().is_empty() {
-            return Err(DocsError::InvalidArgument("range 不能为空".into()));
+    let sheet_range = workbook.worksheet_range(sheet).map_err(|e| {
+        let msg = e.to_string();
+        if msg.to_ascii_lowercase().contains("not found")
+            || msg.contains("找不到")
+            || msg.contains("Sheet")
+        {
+            DocsError::InvalidArgument(format!("工作表不存在: {sheet}"))
+        } else {
+            DocsError::ParseError(format!("读取工作表失败: {e}"))
         }
-    }
+    })?;
 
-    let range = workbook
-        .worksheet_range(sheet)
-        .map_err(|e| DocsError::ParseError(format!("读取工作表失败: {e}")))?;
+    // calamine 使用 0-based 绝对坐标，(0,0)=A1
+    let view = if let Some(r) = &opts.range {
+        let (start, end) = parse_a1_range(r)?;
+        sheet_range.range(start, end)
+    } else {
+        sheet_range
+    };
 
-    let all_rows: Vec<Vec<Value>> = range
+    let all_rows: Vec<Vec<Value>> = view
         .rows()
         .map(|row| row.iter().map(data_to_value).collect())
         .collect();
 
     let total_rows = all_rows.len();
     let offset = opts.offset.unwrap_or(0);
-    let limit = opts.limit.unwrap_or(DEFAULT_ROW_LIMIT);
+    // limit=None 表示不截断（供 to_csv 等内部全量读取）；工具层会注入默认 limit
+    let limit = opts.limit.unwrap_or(usize::MAX);
     if offset > total_rows {
         return Err(DocsError::InvalidArgument(format!(
             "offset {offset} 超出总行数 {total_rows}"
         )));
     }
-    let end = (offset + limit).min(total_rows);
+    let end = offset.saturating_add(limit).min(total_rows);
     let rows = all_rows[offset..end].to_vec();
     let truncated = end < total_rows;
 
@@ -113,7 +123,7 @@ pub fn to_csv(
         sheet,
         ReadSheetOptions {
             range: None,
-            limit: None,
+            limit: None, // 全量导出，不受 xlsx_read 默认 5000 行限制
             offset: None,
         },
     )?;
@@ -129,8 +139,9 @@ pub fn to_csv(
     }
     let mut out_path = None;
     if let Some(p) = output_path {
-        std::fs::write(p, &csv)?;
-        out_path = Some(p.display().to_string());
+        let out = resolve_output_path(None, Some(p), false)?;
+        std::fs::write(&out, &csv)?;
+        out_path = Some(out.display().to_string());
     }
     Ok(CsvResult {
         ok: true,
@@ -144,7 +155,8 @@ pub fn write(
     sheet: &str,
     rows: &[Vec<Value>],
 ) -> DocsResult<XlsxWriteResult> {
-    let out = resolve_output_path(None, Some(path.as_ref()), true)?;
+    // 新建文件：目标已存在时拒绝覆盖（符合写操作默认不覆盖约定）
+    let out = resolve_output_path(None, Some(path.as_ref()), false)?;
     let mut book = umya_spreadsheet::new_file();
     {
         let ws = book
@@ -172,7 +184,9 @@ pub fn update_cells(
     output_path: Option<&Path>,
 ) -> DocsResult<XlsxWriteResult> {
     let src = require_xlsx(path)?;
-    let out = resolve_output_path(Some(&src), output_path, output_path.is_none())?;
+    // 省略 output_path 时写回源文件；指定新路径时默认不覆盖已存在目标
+    let overwrite = output_path.map(|p| paths_equal(&src, p)).unwrap_or(true);
+    let out = resolve_output_path(Some(&src), output_path, overwrite)?;
     let mut book = umya_spreadsheet::reader::xlsx::read(&src)
         .map_err(|e| DocsError::ParseError(e.to_string()))?;
     {
@@ -270,4 +284,105 @@ fn col_to_letters(mut col: usize) -> String {
         col = (col - 1) / 26;
     }
     s
+}
+
+/// 解析 A1 风格区域：`A1`、`A1:B2`（大小写不敏感，允许空白）。
+/// 返回 calamine 0-based 绝对坐标 `(row, col)`。
+fn parse_a1_range(input: &str) -> DocsResult<((u32, u32), (u32, u32))> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err(DocsError::InvalidArgument("range 不能为空".into()));
+    }
+    let (left, right) = match s.split_once(':') {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => (s, s),
+    };
+    if left.is_empty() || right.is_empty() {
+        return Err(DocsError::InvalidArgument(format!(
+            "非法 range 区域: {input}"
+        )));
+    }
+    let start = parse_a1_cell(left)?;
+    let end = parse_a1_cell(right)?;
+    let (r1, c1) = start;
+    let (r2, c2) = end;
+    Ok(((r1.min(r2), c1.min(c2)), (r1.max(r2), c1.max(c2))))
+}
+
+fn parse_a1_cell(cell: &str) -> DocsResult<(u32, u32)> {
+    let bytes = cell.as_bytes();
+    if bytes.is_empty() {
+        return Err(DocsError::InvalidArgument(format!(
+            "非法单元格地址: {cell}"
+        )));
+    }
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    if i == 0 || i == bytes.len() {
+        return Err(DocsError::InvalidArgument(format!(
+            "非法单元格地址: {cell}（期望如 A1）"
+        )));
+    }
+    let col_part = &cell[..i];
+    let row_part = &cell[i..];
+    if !row_part.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(DocsError::InvalidArgument(format!(
+            "非法单元格地址: {cell}"
+        )));
+    }
+    let row_num: u32 = row_part
+        .parse()
+        .map_err(|_| DocsError::InvalidArgument(format!("非法行号: {row_part}")))?;
+    if row_num == 0 {
+        return Err(DocsError::InvalidArgument("行号必须从 1 开始".into()));
+    }
+    let col_num = letters_to_col(col_part)?;
+    // 转为 0-based
+    Ok((row_num - 1, col_num - 1))
+}
+
+fn letters_to_col(letters: &str) -> DocsResult<u32> {
+    let mut col: u32 = 0;
+    for ch in letters.chars() {
+        let c = ch.to_ascii_uppercase();
+        if !c.is_ascii_uppercase() {
+            return Err(DocsError::InvalidArgument(format!("非法列标: {letters}")));
+        }
+        col = col
+            .checked_mul(26)
+            .and_then(|v| v.checked_add((c as u32) - ('A' as u32) + 1))
+            .ok_or_else(|| DocsError::InvalidArgument(format!("列标过大: {letters}")))?;
+    }
+    if col == 0 {
+        return Err(DocsError::InvalidArgument(format!("非法列标: {letters}")));
+    }
+    Ok(col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_range_a1_b2() {
+        let (s, e) = parse_a1_range("A1:B2").unwrap();
+        assert_eq!(s, (0, 0));
+        assert_eq!(e, (1, 1));
+    }
+
+    #[test]
+    fn parse_single_cell() {
+        let (s, e) = parse_a1_range("C3").unwrap();
+        assert_eq!(s, (2, 2));
+        assert_eq!(e, (2, 2));
+    }
+
+    #[test]
+    fn parse_invalid_range() {
+        assert!(parse_a1_range("not-a-range").is_err());
+        assert!(parse_a1_range("").is_err());
+        assert!(parse_a1_range("A0").is_err());
+    }
 }

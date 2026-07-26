@@ -14,7 +14,14 @@
 | 内嵌 | `doc_list_embeddings`, `doc_extract_embedding` |
 | 其它 | `ping` |
 
-大结果读取支持 `limit` / `offset`（默认约 5000 行），返回 `truncated` 元数据。文本编码自动尝试 UTF-8 / GBK / GB18030，失败时 lossy 解码。
+约定摘要（详见设计文档）：
+
+- **路径**：优先绝对路径；相对路径相对进程 CWD
+- **写操作**：默认不覆盖已存在目标；写回源文件或 `overwrite=true`（文本）时允许覆盖
+- **大结果**：`xlsx_read` / `text_read` 支持 `limit`/`offset`（默认约 5000 行），返回 `truncated`
+- **编码**：文本自动尝试 UTF-8 / GBK / GB18030，失败时 lossy 解码
+- **Excel 区域**：`xlsx_read.range` 支持 A1 风格（如 `A1:C10`）
+- **内嵌对象**：只列出/抽取一层，**不写回**宿主
 
 工具 `description` / `inputSchema` 与 server `instructions` 已面向 Agent 意图优化：包含「通读 / 解析 / 读取 / 分析 / 总结 / 提取」等触发词，并明确 `path` 需传本地绝对或相对路径。
 
@@ -57,7 +64,8 @@ cargo clippy
 - 不做完整样式保真
 - 内嵌对象只支持列出与抽取，**不写回**宿主
 - `docx_replace_text` 在 run 被拆分的复杂文档上可能无法替换跨 run 文本
-- `xlsx_read` 的 `range` 参数预留，当前读取整表后再分页
+- `xlsx_read` 支持 A1 区域（如 `A1:C10`）；未指定时读整表，默认 `limit=5000` 分页
+- `xlsx_to_csv` 全量导出，不受 `xlsx_read` 默认行数限制
 
 ## License
 
